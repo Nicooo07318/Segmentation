@@ -15,7 +15,7 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 
 def main():
     print()
-    device = "mps" if torch.mps.is_available() else "cpu"
+    device = "mps" if torch.mps.is_available() else "cuda"
     dataset = Cityscapes('Data/CityScapes/', split='test', mode='fine', target_type='semantic')
     #print(dataset[0][0].size)
 
@@ -26,7 +26,6 @@ def main():
 def eval(dataset, device):
     img = dataset[1][0]
     mask = dataset[1][1]
-    mask.show()
 
     name = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
     processor = SegformerImageProcessor.from_pretrained(name)
