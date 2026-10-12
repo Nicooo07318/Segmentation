@@ -2,13 +2,25 @@ from PIL import Image
 from torchvision.datasets import Cityscapes
 import torchvision.transforms as transforms
 import torch
+import torch.nn as nn
 import numpy as np
+import evaluate
+
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+from transformers import TrainingArguments, Trainer
+from torch.utils.data import random_split
 
+
+device = "mps" if torch.mps.is_available() else "cuda"
+
+name = "nvidia/mit-b0"
+processor = SegformerImageProcessor.from_pretrained(name)
+model = SegformerForSemanticSegmentation.from_pretrained(name)
+model.to(device)
 
 # restructure classes and pair the new class id with a readable name
 ignore_index=255
@@ -66,28 +78,66 @@ def decode_segmap(temp):
 
 # set device and dataset
 def init():
-    device = "mps" if torch.mps.is_available() else "cuda"
-    dataset = Cityscapes('Data/CityScapes/', split='val', mode='fine', target_type='semantic')
+    
+    train_dataset = Cityscapes('Data/CityScapes/', split='train', mode='fine', target_type='semantic', transform=processor)
+    
+    val_dataset = Cityscapes('Data/CityScapes/', split='val', mode='fine', target_type='semantic', transform=processor)
 
-    name = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
-    processor = SegformerImageProcessor.from_pretrained(name)
-    model = SegformerForSemanticSegmentation.from_pretrained(name)
-    model.eval()
-    model.to(device)
+    val_size = int(0.8*len(val_dataset))
+    test_size = len(val_dataset) - val_size
+
+    val_dataset, test_dataset = random_split(val_dataset, [val_size, test_size])
+
+    
+
+    
 
 
-    return device, dataset, processor, model
+    return val_dataset, train_dataset, test_dataset
+
+def train_setup():
+    epochs = 50
+    lr = 0.00006
+    batch_size = 2
+
+    hub_model_id = "segformer-b0-finetuned-Cityscapes-50epochs"
+
+    training_args = TrainingArguments(
+        "segformer-b0-finetuned-Cityscapes-50epochs-output",
+        learning_rate=lr,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        save_total_limit=3,
+        evaluation_strategy="steps",
+        save_strategy="steps",
+        save_steps=20,
+        eval_steps=20,
+        logging_steps=1,
+        eval_accumulation_steps=5,
+        load_best_model_at_end=True,
+        push_to_hub=False,
+        hub_model_id=hub_model_id,
+        hub_strategy="end",
+    )
+    return training_args
 
 
 
 
 def main():
-    device, dataset, processor, model = init()
-    eval(dataset, device, processor, model)
+    val_dataset, train_dataset, test_dataset = init()
+    
+    training_args = train_setup()
+    train(training_args, train_dataset, test_dataset)
+
+    
+    #eval(val_dataset, processor, model)
 
 
 
-def eval(dataset, device, processor, model):
+def eval(dataset, processor, model):
+    model.eval()
     img, mask = dataset[0]
 
     # visualize img and mask
@@ -119,8 +169,51 @@ def eval(dataset, device, processor, model):
     plt.show()
 
 
+def train(training_args, train_dataset, test_dataset):
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train()
 
 
+
+metric = evaluate.load("mean_iou")
+
+
+def compute_metrics(eval_pred):
+  with torch.no_grad():
+    logits, labels = eval_pred
+    logits_tensor = torch.from_numpy(logits)
+    # scale the logits to the size of the label
+    logits_tensor = nn.functional.interpolate(
+        logits_tensor,
+        size=labels.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    ).argmax(dim=1)
+
+    pred_labels = logits_tensor.detach().cpu().numpy()
+    metrics = metric.compute(
+        predictions=pred_labels,
+        references=labels,
+        num_labels=len(n_classes),
+        ignore_index=0,
+        reduce_labels=processor.do_reduce_labels,
+    )
+    
+    # add per category metrics as individual key-value pairs
+    per_category_accuracy = metrics.pop("per_category_accuracy").tolist()
+    per_category_iou = metrics.pop("per_category_iou").tolist()
+
+    metrics.update({f"accuracy_{n_classes[i]}": v for i, v in enumerate(per_category_accuracy)})
+    metrics.update({f"iou_{n_classes[i]}": v for i, v in enumerate(per_category_iou)})
+    
+    return metrics
 
 
     
