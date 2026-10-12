@@ -6,3 +6,4 @@
 /share/
 /pyvenv.cfg
 /.DS_Store
+/segformer-b0-finetuned-Cityscapes-50epochs-output/

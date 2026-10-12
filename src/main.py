@@ -1,5 +1,6 @@
 from PIL import Image
 from torchvision.datasets import Cityscapes
+from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 import torch
 import torch.nn as nn
@@ -14,13 +15,37 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 from transformers import TrainingArguments, Trainer
 from torch.utils.data import random_split
 
+class SegformerCityscapes(Dataset):
+    def __init__(self, root, split, processor):
+        self.dataset = Cityscapes(
+            root, 
+            split=split,
+            mode="fine",
+            target_type="semantic"
+        )
+        self.processor = processor
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, mask = self.dataset[idx]
+        mask = encode_segmap(np.array(mask))
+
+        encoded = self.processor(
+            images=image,
+            segmentation_maps=mask,
+            return_tensors="pt",
+        )
+
+        return {
+            "pixel_values": encoded["pixel_values"].squeeze(0),
+            "labels": encoded["labels"].squeeze(0).long(),
+        }
+
+
 
 device = "mps" if torch.mps.is_available() else "cuda"
-
-name = "nvidia/mit-b0"
-processor = SegformerImageProcessor.from_pretrained(name)
-model = SegformerForSemanticSegmentation.from_pretrained(name)
-model.to(device)
 
 # restructure classes and pair the new class id with a readable name
 ignore_index=255
@@ -33,6 +58,24 @@ class_map = dict(zip(valid_classes, range(len(valid_classes))))
 n_classes=len(valid_classes)
 print(n_classes)
 print(class_map)
+
+
+name = "nvidia/mit-b0"
+processor = SegformerImageProcessor.from_pretrained(
+    name,
+    reduce_labels=False,
+)
+
+id2label = dict(enumerate(class_names))
+label2id = {name: index for index, name in id2label.items()}
+
+model = SegformerForSemanticSegmentation.from_pretrained(
+    name,
+    num_labels=n_classes,
+    id2label=id2label,
+    label2id=label2id,
+    ignore_mismatched_sizes=True,)
+model.to(device)
 
 
 # give each class id a specific color
@@ -79,18 +122,23 @@ def decode_segmap(temp):
 # set device and dataset
 def init():
     
-    train_dataset = Cityscapes('Data/CityScapes/', split='train', mode='fine', target_type='semantic', transform=processor)
+    train_dataset = SegformerCityscapes('' \
+        'Data/CityScapes/', 
+        split='train', 
+        processor=processor)
     
-    val_dataset = Cityscapes('Data/CityScapes/', split='val', mode='fine', target_type='semantic', transform=processor)
+    full_val_dataset = SegformerCityscapes(
+        'Data/CityScapes/', 
+        split='val', 
+        processor=processor)
 
-    val_size = int(0.8*len(val_dataset))
-    test_size = len(val_dataset) - val_size
+    val_size = int(0.8*len(full_val_dataset))
+    test_size = len(full_val_dataset) - val_size
 
-    val_dataset, test_dataset = random_split(val_dataset, [val_size, test_size])
-
-    
-
-    
+    val_dataset, test_dataset = random_split(
+        full_val_dataset, [val_size, test_size],
+        generator=torch.Generator().manual_seed(42),
+    )
 
 
     return val_dataset, train_dataset, test_dataset
@@ -109,7 +157,7 @@ def train_setup():
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         save_total_limit=3,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         save_strategy="steps",
         save_steps=20,
         eval_steps=20,
@@ -129,7 +177,7 @@ def main():
     val_dataset, train_dataset, test_dataset = init()
     
     training_args = train_setup()
-    train(training_args, train_dataset, test_dataset)
+    train(training_args, train_dataset, val_dataset, test_dataset)
 
     
     #eval(val_dataset, processor, model)
@@ -169,12 +217,12 @@ def eval(dataset, processor, model):
     plt.show()
 
 
-def train(training_args, train_dataset, test_dataset):
+def train(training_args, train_dataset, val_dataset, test_dataset):
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=test_dataset,
+        eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
     )
 
@@ -201,8 +249,8 @@ def compute_metrics(eval_pred):
     metrics = metric.compute(
         predictions=pred_labels,
         references=labels,
-        num_labels=len(n_classes),
-        ignore_index=0,
+        num_labels=len(id2label),
+        ignore_index=ignore_index,
         reduce_labels=processor.do_reduce_labels,
     )
     
@@ -210,8 +258,8 @@ def compute_metrics(eval_pred):
     per_category_accuracy = metrics.pop("per_category_accuracy").tolist()
     per_category_iou = metrics.pop("per_category_iou").tolist()
 
-    metrics.update({f"accuracy_{n_classes[i]}": v for i, v in enumerate(per_category_accuracy)})
-    metrics.update({f"iou_{n_classes[i]}": v for i, v in enumerate(per_category_iou)})
+    metrics.update({f"accuracy_{id2label[i]}": v for i, v in enumerate(per_category_accuracy)})
+    metrics.update({f"iou_{id2label[i]}": v for i, v in enumerate(per_category_iou)})
     
     return metrics
 
