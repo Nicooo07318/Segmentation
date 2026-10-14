@@ -45,7 +45,8 @@ class SegformerCityscapes(Dataset):
 
 
 
-device = "mps" if torch.mps.is_available() else "cuda"
+device = torch.device("mps" if torch.mps.is_available() else "cpu")
+print(device)
 
 # restructure classes and pair the new class id with a readable name
 ignore_index=255
